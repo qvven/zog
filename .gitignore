@@ -1,0 +1,19 @@
+.zig-cache/
+zig-out/
+zig-cache/
+demo.log
+demo.log.*
+example.log
+example.log.*
+# Log artifacts written by the file-sink tests: number-stamped (app.log.1),
+# date-stamped (app.log.2026-06-18), and zero-padded collision (.001) siblings.
+*.log
+*.log.*
+docs/
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
