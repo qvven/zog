@@ -30,7 +30,8 @@ log.warn("disk {d}% full", .{92});
 - **Multiple sinks** - built-in stderr (with auto color detection) and file,
   plus a `Sink` vtable for anything else: memory, syslog, network.
 - **Tunable file flush and rotation** - flush every line, buffer, flush on
-  level, or archive the file when it reaches a size cap.
+  level, or archive the file when it reaches a size cap. Missing parent
+  directories for `file_path` are created automatically.
 - **Thread-safe** - optional internal mutex.
 
 See [`examples/`](examples/) for runnable usage of each:

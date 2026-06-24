@@ -96,6 +96,10 @@ pub fn deleteLogFamily(io: std.Io, cwd: std.Io.Dir, path: []const u8) void {
     }
 }
 
+pub fn deleteTree(io: std.Io, cwd: std.Io.Dir, path: []const u8) void {
+    cwd.deleteTree(io, path) catch {};
+}
+
 pub fn writeWholeFile(io: std.Io, cwd: std.Io.Dir, path: []const u8, bytes: []const u8) !void {
     const f = try cwd.createFile(io, path, .{ .truncate = true });
     defer f.close(io);

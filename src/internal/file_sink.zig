@@ -21,6 +21,7 @@ pub fn Make(comptime cfg: anytype) type {
             errdefer self.close();
 
             if (comptime cfg.file_path) |path| {
+                try ensureParentDir(io, path);
                 const f = try Io.Dir.cwd().createFile(io, path, .{
                     .truncate = false,
                     .read = true,
@@ -95,6 +96,7 @@ pub fn Make(comptime cfg: anytype) type {
 
         fn reopen(self: *Self, comptime truncate: bool) !void {
             const path = comptime cfg.file_path orelse unreachable;
+            try ensureParentDir(self.io, path);
             const f = try Io.Dir.cwd().createFile(self.io, path, .{
                 .truncate = truncate,
                 .read = true,
@@ -107,4 +109,9 @@ pub fn Make(comptime cfg: anytype) type {
             if (!truncate) self.writer.seekTo(self.bytes) catch {};
         }
     };
+}
+
+fn ensureParentDir(io: Io, path: []const u8) !void {
+    const parent = std.fs.path.dirname(path) orelse return;
+    try Io.Dir.cwd().createDirPath(io, parent);
 }

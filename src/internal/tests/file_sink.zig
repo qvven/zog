@@ -18,6 +18,7 @@ const openCloseNoFile = h.openCloseNoFile;
 const DropSink = h.DropSink;
 const deleteLogFiles = h.deleteLogFiles;
 const deleteLogFamily = h.deleteLogFamily;
+const deleteTree = h.deleteTree;
 const writeWholeFile = h.writeWholeFile;
 const findSingleArchive = h.findSingleArchive;
 const readLogFileAlloc = h.readLogFileAlloc;
@@ -43,6 +44,27 @@ test "flush policy: every_line makes file writes visible immediately" {
     const content = try readLogFileAlloc(io, cwd, path, gpa);
     defer gpa.free(content);
     try testing.expect(std.mem.indexOf(u8, content, "immediate") != null);
+}
+
+test "file sink creates missing parent directories" {
+    const gpa = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const cwd = std.Io.Dir.cwd();
+    const root = "zog_missing_parent";
+    const path = "zog_missing_parent/nested/app.log";
+
+    deleteTree(io, cwd, root);
+    defer deleteTree(io, cwd, root);
+
+    const Logger = make(.{ .stderr = false, .timestamp = .none, .file_path = path });
+    var log = try Logger.open(gpa, io);
+    defer log.close(io);
+
+    log.info("created", .{});
+
+    const content = try readLogFileAlloc(io, cwd, path, gpa);
+    defer gpa.free(content);
+    try testing.expectEqualStrings("[info] created\n", content);
 }
 
 test "flush policy: buffered holds file writes until flush()" {
