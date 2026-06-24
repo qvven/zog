@@ -46,7 +46,7 @@ test "public api contract: root exports stable v0.1 surface" {
     try testing.expect(@hasDecl(zog, "TimestampFormat"));
     try testing.expect(@hasDecl(zog, "LineFormat"));
     try testing.expect(@hasDecl(zog, "SourceMode"));
-    try testing.expect(@hasDecl(zog, "ColorMode"));
+    try testing.expect(!@hasDecl(zog, "ColorMode"));
     try testing.expect(@hasDecl(zog, "Sink"));
     try testing.expect(@hasDecl(zog, "MemorySink"));
     try testing.expect(@hasDecl(zog, "Stats"));
@@ -63,7 +63,6 @@ test "public api contract: root exports stable v0.1 surface" {
     try testing.expectEqual(zog.LineFormat.text, cfg.format);
     try testing.expectEqual(zog.SourceMode.none, cfg.source);
     try testing.expectEqual(true, cfg.stderr);
-    try testing.expectEqual(zog.ColorMode.auto, cfg.stderr_color);
     try testing.expectEqual(@as(?[]const u8, null), cfg.file_path);
     try testing.expectEqual(zog.FlushPolicy.every_line, cfg.flush_policy);
     try testing.expectEqual(Level.warn, cfg.flush_on_level);

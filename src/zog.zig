@@ -26,9 +26,6 @@ pub const LineFormat = enum { text, json };
 /// Source location rendering mode.
 pub const SourceMode = enum { none, file_line };
 
-/// ANSI color mode for stderr.
-pub const ColorMode = enum { auto, always, never };
-
 /// When the file sink flushes to disk. Only affects the file sink; stderr
 /// always flushes per line so terminal output stays prompt.
 pub const FlushPolicy = enum {
@@ -95,8 +92,6 @@ pub const Config = struct {
     source: SourceMode = .none,
     /// Enable stderr output.
     stderr: bool = true,
-    /// Stderr ANSI color mode.
-    stderr_color: ColorMode = .auto,
     /// Optional log file path.
     file_path: ?[]const u8 = null,
     /// When the file sink flushes to disk. Does not affect stderr.

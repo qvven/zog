@@ -75,7 +75,6 @@ pub const Config = struct {
     format: LineFormat = .text,                // .text | .json
     source: SourceMode = .none,                // .none | .file_line
     stderr: bool = true,
-    stderr_color: ColorMode = .auto,           // .auto | .always | .never
     file_path: ?[]const u8 = null,
     flush_policy: FlushPolicy = .every_line,   // .every_line | .buffered | .on_level
     flush_on_level: Level = .warn,             // .on_level flush threshold

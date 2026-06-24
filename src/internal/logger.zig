@@ -73,14 +73,8 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
                 self.stderr_writer = self.stderr_file.writer(io, stderr_buf);
                 self.stderr_opened = true;
 
-                self.colorize = switch (comptime cfg.stderr_color) {
-                    .never => false,
-                    .always => true,
-                    .auto => blk: {
-                        self.stderr_file.enableAnsiEscapeCodes(io) catch {};
-                        break :blk self.stderr_file.supportsAnsiEscapeCodes(io) catch false;
-                    },
-                };
+                self.stderr_file.enableAnsiEscapeCodes(io) catch {};
+                self.colorize = self.stderr_file.supportsAnsiEscapeCodes(io) catch false;
             }
 
             if (comptime cfg.file_path) |path| {
@@ -346,14 +340,10 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
 
             if (comptime cfg.stderr) {
                 const w = &self.stderr_writer.interface;
-                if (comptime cfg.stderr_color != .never) {
-                    if (self.colorize) {
-                        w.writeAll(ansi(level)) catch {};
-                        w.writeAll(line) catch {};
-                        w.writeAll(ANSI_RESET) catch {};
-                    } else {
-                        w.writeAll(line) catch {};
-                    }
+                if (self.colorize) {
+                    w.writeAll(ansi(level)) catch {};
+                    w.writeAll(line) catch {};
+                    w.writeAll(ANSI_RESET) catch {};
                 } else {
                     w.writeAll(line) catch {};
                 }
