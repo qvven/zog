@@ -55,7 +55,7 @@ if (log.enabled(.debug)) {
 Add zog to your project:
 
 ```sh
-zig fetch --save https://github.com/qvven/zog/archive/refs/tags/v0.2.1.tar.gz
+zig fetch --save https://github.com/qvven/zog/archive/refs/tags/v0.3.0.tar.gz
 ```
 
 Then import the package module from your `build.zig`:
