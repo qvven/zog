@@ -7,6 +7,39 @@ const MemorySink = zog.MemorySink;
 const make = zog.make;
 const time_internal = @import("time.zig");
 
+fn parseJsonLine(gpa: std.mem.Allocator, line: []const u8) !std.json.Parsed(std.json.Value) {
+    return std.json.parseFromSlice(std.json.Value, gpa, std.mem.trimEnd(u8, line, "\n"), .{});
+}
+
+fn expectJsonString(obj: anytype, key: []const u8, expected: []const u8) !void {
+    const value = obj.get(key) orelse return error.MissingJsonField;
+    switch (value) {
+        .string => |actual| try testing.expectEqualStrings(expected, actual),
+        else => return error.UnexpectedJsonFieldType,
+    }
+}
+
+fn expectJsonInteger(obj: anytype, key: []const u8, expected: i64) !void {
+    const value = obj.get(key) orelse return error.MissingJsonField;
+    switch (value) {
+        .integer => |actual| try testing.expectEqual(expected, actual),
+        else => return error.UnexpectedJsonFieldType,
+    }
+}
+
+fn expectJsonBool(obj: anytype, key: []const u8, expected: bool) !void {
+    const value = obj.get(key) orelse return error.MissingJsonField;
+    switch (value) {
+        .bool => |actual| try testing.expectEqual(expected, actual),
+        else => return error.UnexpectedJsonFieldType,
+    }
+}
+
+fn expectJsonNull(obj: anytype, key: []const u8) !void {
+    const value = obj.get(key) orelse return error.MissingJsonField;
+    try testing.expect(value == .null);
+}
+
 test "public api contract: root exports stable v0.1 surface" {
     try testing.expect(@hasDecl(zog, "Level"));
     try testing.expect(@hasDecl(zog, "NoScope"));
@@ -20,6 +53,9 @@ test "public api contract: root exports stable v0.1 surface" {
     try testing.expect(@hasDecl(zog, "Config"));
     try testing.expect(@hasDecl(zog, "make"));
     try testing.expect(@hasDecl(zog, "FlushPolicy"));
+    try testing.expect(@hasField(zog.Stats, "dropped_lines"));
+    try testing.expect(@hasField(zog.Stats, "file_write_errors"));
+    try testing.expect(!@hasField(zog.Stats, "extra_sink_errors"));
 
     const cfg: zog.Config = .{};
     try testing.expectEqual(Level.info, cfg.min_level);
@@ -96,9 +132,10 @@ test "level filter: debug below min_level=.info skips sinks" {
     log.debug("should be filtered", .{});
     log.info("should pass", .{});
 
-    try testing.expectEqual(@as(usize, 1), mem.entries().len);
-    try testing.expectEqual(Level.info, mem.entries()[0].level);
-    try testing.expect(std.mem.indexOf(u8, mem.entries()[0].line, "should pass") != null);
+    const entries = mem.entries();
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    try testing.expectEqual(Level.info, entries[0].level);
+    try testing.expect(std.mem.indexOf(u8, entries[0].line, "should pass") != null);
     try testing.expect(std.mem.indexOf(u8, mem.bytes(), "should be filtered") == null);
 }
 
@@ -134,11 +171,12 @@ test "scope filter: per-scope minLevel lets .db emit only err" {
     db.err("db down", .{});
     log.info("default channel", .{});
 
-    try testing.expectEqual(@as(usize, 3), mem.entries().len);
-    try testing.expectEqualStrings("auth", mem.entries()[0].scope_name);
-    try testing.expectEqualStrings("db", mem.entries()[1].scope_name);
-    try testing.expectEqual(Level.err, mem.entries()[1].level);
-    try testing.expectEqualStrings("default", mem.entries()[2].scope_name);
+    const entries = mem.entries();
+    try testing.expectEqual(@as(usize, 3), entries.len);
+    try testing.expectEqualStrings("auth", entries[0].scope_name);
+    try testing.expectEqualStrings("db", entries[1].scope_name);
+    try testing.expectEqual(Level.err, entries[1].level);
+    try testing.expectEqualStrings("default", entries[2].scope_name);
 
     try testing.expect(std.mem.indexOf(u8, mem.bytes(), "db chatter") == null);
 }
@@ -160,13 +198,14 @@ test "line format: default scope omits the scope segment" {
     const auth = log.scope(.auth);
     auth.warn("scoped", .{});
 
-    try testing.expectEqual(@as(usize, 2), mem.entries().len);
+    const entries = mem.entries();
+    try testing.expectEqual(@as(usize, 2), entries.len);
 
-    const default_line = mem.entries()[0].line;
+    const default_line = entries[0].line;
     try testing.expect(std.mem.endsWith(u8, default_line, "] [info] plain\n"));
     try testing.expect(std.mem.indexOf(u8, default_line, "[default]") == null);
 
-    const scoped_line = mem.entries()[1].line;
+    const scoped_line = entries[1].line;
     try testing.expect(std.mem.indexOf(u8, scoped_line, "[warn] [auth] scoped\n") != null);
 }
 
@@ -301,9 +340,10 @@ test "thread safety: concurrent writes keep count and avoid interleaving" {
     }
     for (&threads) |t| t.join();
 
-    try testing.expectEqual(@as(usize, 8 * 1000), mem.entries().len);
+    const entries = mem.entries();
+    try testing.expectEqual(@as(usize, 8 * 1000), entries.len);
 
-    for (mem.entries()) |e| {
+    for (entries) |e| {
         try testing.expect(e.line.len > 0);
         try testing.expectEqual(@as(u8, '\n'), e.line[e.line.len - 1]);
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, e.line, "\n"));
@@ -329,11 +369,13 @@ test "json format: default scope outputs ts/level/msg and no scope field" {
     log.info("hello {s}", .{"world"});
 
     const line = mem.entries()[0].line;
-    try testing.expect(std.mem.startsWith(u8, line, "{\"ts\":"));
-    try testing.expect(std.mem.indexOf(u8, line, "\"level\":\"info\"") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"msg\":\"hello world\"") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"scope\"") == null);
-    try testing.expect(std.mem.endsWith(u8, line, "}\n"));
+    var parsed = try parseJsonLine(gpa, line);
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expect(obj.contains("ts"));
+    try expectJsonString(obj, "level", "info");
+    try expectJsonString(obj, "msg", "hello world");
+    try testing.expect(!obj.contains("scope"));
 }
 
 test "json format: custom scope field appears and msg escapes characters" {
@@ -376,8 +418,14 @@ test "json format: ts = .iso8601_utc emits a string timestamp" {
 
     log.info("hi", .{});
     const line = mem.entries()[0].line;
-    try testing.expect(std.mem.startsWith(u8, line, "{\"ts\":\""));
-    try testing.expect(std.mem.indexOf(u8, line, "Z\",\"level\":\"info\"") != null);
+    var parsed = try parseJsonLine(gpa, line);
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    const ts = obj.get("ts") orelse return error.MissingJsonField;
+    try testing.expect(ts == .string);
+    try testing.expectEqual(@as(usize, time_internal.ISO8601_UTC_LEN), ts.string.len);
+    try testing.expectEqual(@as(u8, 'Z'), ts.string[time_internal.ISO8601_UTC_LEN - 1]);
+    try expectJsonString(obj, "level", "info");
 }
 
 test "json format: timestamp = .none omits ts field" {
@@ -420,22 +468,19 @@ test "json output parses as valid JSON across mixed field types" {
         .opt_none = @as(?u8, null),
     });
 
-    const line = mem.entries()[0].line;
-    const trimmed = std.mem.trimEnd(u8, line, "\n");
-
     // Parsing the emitted line is the strongest guard that escaping,
     // null handling, enums, and optionals all produce well-formed output.
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, trimmed, .{});
+    var parsed = try parseJsonLine(gpa, mem.entries()[0].line);
     defer parsed.deinit();
     const obj = parsed.value.object;
 
-    try testing.expectEqualStrings("a\"b\nc", obj.get("s").?.string);
-    try testing.expectEqual(@as(i64, -5), obj.get("i").?.integer);
-    try testing.expect(obj.get("nan").? == .null);
-    try testing.expect(obj.get("b").?.bool);
-    try testing.expectEqualStrings("red", obj.get("e").?.string);
-    try testing.expectEqual(@as(i64, 3), obj.get("opt_some").?.integer);
-    try testing.expect(obj.get("opt_none").? == .null);
+    try expectJsonString(obj, "s", "a\"b\nc");
+    try expectJsonInteger(obj, "i", -5);
+    try expectJsonNull(obj, "nan");
+    try expectJsonBool(obj, "b", true);
+    try expectJsonString(obj, "e", "red");
+    try expectJsonInteger(obj, "opt_some", 3);
+    try expectJsonNull(obj, "opt_none");
 }
 
 test "kv optional fields unwrap: null renders as null, present unwraps to inner" {
@@ -528,13 +573,16 @@ test "json kv: non-finite floats render as null, finite ones normally" {
         .ok = @as(f64, 1.5),
     });
 
-    const line = mem.entries()[0].line;
-    try testing.expect(std.mem.indexOf(u8, line, "\"nan\":null") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"inf\":null") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"ok\":1.5") != null);
-    // No bare nan/inf tokens that would break a JSON parser.
-    try testing.expect(std.mem.indexOf(u8, line, "nan,") == null);
-    try testing.expect(std.mem.indexOf(u8, line, ":inf") == null);
+    var parsed = try parseJsonLine(gpa, mem.entries()[0].line);
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try expectJsonNull(obj, "nan");
+    try expectJsonNull(obj, "inf");
+    const ok = obj.get("ok") orelse return error.MissingJsonField;
+    switch (ok) {
+        .float => |actual| try testing.expectEqual(@as(f64, 1.5), actual),
+        else => return error.UnexpectedJsonFieldType,
+    }
 }
 
 test "json format: truncated escaped msg stays valid and closed" {
@@ -560,7 +608,7 @@ test "json format: truncated escaped msg stays valid and closed" {
     try testing.expect(std.mem.startsWith(u8, line, "{"));
     try testing.expect(std.mem.endsWith(u8, line, "}\n"));
     // The real guarantee: a truncated line is still parseable JSON.
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, std.mem.trimEnd(u8, line, "\n"), .{});
+    var parsed = try parseJsonLine(gpa, line);
     parsed.deinit();
 }
 
@@ -585,7 +633,7 @@ test "json format: truncated msg stays valid and closed" {
 
     const line = mem.entries()[0].line;
     try testing.expect(std.mem.endsWith(u8, line, "}\n"));
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, std.mem.trimEnd(u8, line, "\n"), .{});
+    var parsed = try parseJsonLine(gpa, line);
     parsed.deinit();
 }
 
@@ -660,7 +708,7 @@ test "json format: truncated kv string field stays valid" {
     const line = mem.entries()[0].line;
     try testing.expect(std.mem.startsWith(u8, line, "{"));
     try testing.expect(std.mem.endsWith(u8, line, "}\n"));
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, std.mem.trimEnd(u8, line, "\n"), .{});
+    var parsed = try parseJsonLine(gpa, line);
     parsed.deinit();
 }
 
@@ -692,10 +740,9 @@ test "json format: truncated source file field stays valid JSON" {
         log.at(@src()).info("connected", .{});
 
         const line = mem.entries()[0].line;
-        const trimmed = std.mem.trimEnd(u8, line, "\n");
-        if (std.mem.indexOf(u8, trimmed, "\"file\"") != null) {
-            var parsed = std.json.parseFromSlice(std.json.Value, gpa, trimmed, .{}) catch |e| {
-                std.debug.print("cap={d} produced invalid JSON: {s}\n", .{ cap, trimmed });
+        if (std.mem.indexOf(u8, line, "\"file\"") != null) {
+            var parsed = parseJsonLine(gpa, line) catch |e| {
+                std.debug.print("cap={d} produced invalid JSON: {s}\n", .{ cap, line });
                 return e;
             };
             parsed.deinit();
@@ -729,7 +776,7 @@ test "json format: truncated numeric and bool kv fields stay valid" {
     const line = mem.entries()[0].line;
     try testing.expect(std.mem.startsWith(u8, line, "{"));
     try testing.expect(std.mem.endsWith(u8, line, "}\n"));
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, std.mem.trimEnd(u8, line, "\n"), .{});
+    var parsed = try parseJsonLine(gpa, line);
     parsed.deinit();
 }
 
@@ -1060,13 +1107,14 @@ test "source file_line: json kv via at(@src()) includes file and line fields" {
     log.at(loc).warn("auth fail", .{ .user = "ada" });
 
     const line = mem.entries()[0].line;
-    try testing.expect(std.mem.startsWith(u8, line, "{\"level\":\"warn\",\"file\":"));
-    try testing.expect(std.mem.indexOf(u8, line, "\"msg\":\"auth fail\"") != null);
-    try testing.expect(std.mem.indexOf(u8, line, "\"user\":\"ada\"") != null);
-
-    var expected_line_field: [32]u8 = undefined;
-    const line_field = try std.fmt.bufPrint(&expected_line_field, "\"line\":{d}", .{loc.line});
-    try testing.expect(std.mem.indexOf(u8, line, line_field) != null);
+    var parsed = try parseJsonLine(gpa, line);
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try expectJsonString(obj, "level", "warn");
+    try expectJsonString(obj, "file", loc.file);
+    try expectJsonInteger(obj, "line", @intCast(loc.line));
+    try expectJsonString(obj, "msg", "auth fail");
+    try expectJsonString(obj, "user", "ada");
 }
 
 test "kv: scoped logger with fields still obeys level filtering" {
@@ -1210,8 +1258,8 @@ test "file write failure increments stats counters" {
     try testing.expect(std.mem.indexOf(u8, mem.entries()[0].line, "closed file handle") != null);
 
     const s = log.stats();
-    try testing.expect(s.file_write_errors >= 1);
-    try testing.expect(s.dropped_lines >= 1);
+    try testing.expectEqual(@as(u64, 1), s.file_write_errors);
+    try testing.expectEqual(@as(u64, 1), s.dropped_lines);
 
     log.file = null;
     log.close(io);

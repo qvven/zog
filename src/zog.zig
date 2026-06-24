@@ -80,10 +80,6 @@ pub const Stats = struct {
     dropped_lines: u64 = 0,
     /// File writer or flush errors.
     file_write_errors: u64 = 0,
-    /// Reserved for future extra-sink failure reporting. The current
-    /// `Sink.VTable.write` returns void, so the logger cannot observe
-    /// extra-sink errors and this remains 0.
-    extra_sink_errors: u64 = 0,
 };
 
 pub const Config = struct {
