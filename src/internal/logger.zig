@@ -7,18 +7,9 @@ const Io = std.Io;
 const fmt_internal = @import("format.zig");
 const fields_internal = @import("fields.zig");
 const file_sink_internal = @import("file_sink.zig");
+const stderr_sink_internal = @import("stderr_sink.zig");
 
-const ANSI_RESET = "\x1b[0m";
 const SourceLocation = std.builtin.SourceLocation;
-
-fn ansi(level: anytype) []const u8 {
-    return switch (level) {
-        .debug => "\x1b[90m", // dim gray
-        .info => "\x1b[32m", // green
-        .warn => "\x1b[33m", // yellow
-        .err => "\x1b[31m", // red
-    };
-}
 
 /// Builds the concrete logger struct for `cfg`. `root` is the `zog` module.
 pub fn Make(comptime root: type, comptime cfg: root.Config) type {
@@ -26,6 +17,7 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
     const Sink = root.Sink;
     const Stats = root.Stats;
     const FileSink = file_sink_internal.Make(cfg);
+    const StderrSink = stderr_sink_internal.Make(cfg);
 
     return struct {
         const Self = @This();
@@ -40,10 +32,8 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
 
         file_sink: FileSink = undefined,
         file_sink_opened: bool = false,
-        stderr_file: Io.File = undefined,
-        stderr_writer: Io.File.Writer = undefined,
-        stderr_opened: bool = false,
-        colorize: bool = false,
+        stderr_sink: StderrSink = undefined,
+        stderr_sink_opened: bool = false,
         extra_sinks: std.ArrayList(Sink) = .empty,
         mutex: Io.Mutex = .init,
         line_buf: []u8,
@@ -64,18 +54,8 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
             errdefer self.cleanupOpenFailure();
 
             if (comptime cfg.stderr) {
-                // Size the stderr buffer to hold a full line (plus a little
-                // slack for the ANSI color wrap) so a typical line drains in
-                // one write rather than several. A line can still exceed this;
-                // `writeAll` just drains in multiple passes then.
-                const stderr_buf_len = cfg.max_line_bytes + 16;
-                const stderr_buf = try gpa.alloc(u8, stderr_buf_len);
-                self.stderr_file = Io.File.stderr();
-                self.stderr_writer = self.stderr_file.writer(io, stderr_buf);
-                self.stderr_opened = true;
-
-                self.stderr_file.enableAnsiEscapeCodes(io) catch {};
-                self.colorize = self.stderr_file.supportsAnsiEscapeCodes(io) catch false;
+                self.stderr_sink = try StderrSink.open(gpa, io);
+                self.stderr_sink_opened = true;
             }
 
             if (comptime cfg.file_path != null) {
@@ -88,11 +68,7 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
 
         pub fn close(self: *Self, io: Io) void {
             _ = io;
-            if (self.stderr_opened) {
-                self.stderr_writer.interface.flush() catch {};
-                self.gpa.free(self.stderr_writer.interface.buffer);
-                self.stderr_opened = false;
-            }
+            if (self.stderr_sink_opened) self.stderr_sink.close();
             if (self.file_sink_opened) self.file_sink.close();
             self.extra_sinks.deinit(self.gpa);
             self.gpa.free(self.line_buf);
@@ -101,10 +77,7 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
 
         fn cleanupOpenFailure(self: *Self) void {
             if (self.file_sink_opened) self.file_sink.close();
-            if (self.stderr_opened) {
-                self.gpa.free(self.stderr_writer.interface.buffer);
-                self.stderr_opened = false;
-            }
+            if (self.stderr_sink_opened) self.stderr_sink.close();
         }
 
         /// Adds an extra sink. Takes the mutex (when `thread_safe`) because
@@ -124,7 +97,7 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
         pub fn flush(self: *Self) void {
             if (comptime cfg.thread_safe) self.mutex.lockUncancelable(self.io);
             defer if (comptime cfg.thread_safe) self.mutex.unlock(self.io);
-            if (self.stderr_opened) self.stderr_writer.interface.flush() catch {};
+            if (self.stderr_sink_opened) self.stderr_sink.flush();
             if (self.file_sink_opened) {
                 self.file_sink.flush() catch self.recordFileError();
             }
@@ -133,11 +106,27 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
         fn recordFileError(self: *Self) void {
             self.stats_data.file_write_errors += 1;
             self.stats_data.dropped_lines += 1;
-            if (!self.warned_file_error and self.stderr_opened) {
+            if (!self.warned_file_error and self.stderr_sink_opened) {
                 self.warned_file_error = true;
-                const w = &self.stderr_writer.interface;
-                w.writeAll("zog: file sink write failed; further errors will be counted in stats() but not reprinted\n") catch {};
-                w.flush() catch {};
+                self.stderr_sink.writePlain("zog: file sink write failed; further errors will be counted in stats() but not reprinted\n");
+            }
+        }
+
+        fn emitLine(self: *Self, comptime scope_tag: Scope, comptime level: Level, line: []const u8) void {
+            if (self.stderr_sink_opened) self.stderr_sink.writeLine(level, line);
+            if (self.file_sink_opened) {
+                // The flush decision is comptime-known per call site. Under
+                // `.on_level`, calls below the threshold compile to buffered
+                // writes with no runtime branch.
+                const flush_file = comptime switch (cfg.flush_policy) {
+                    .every_line => true,
+                    .buffered => false,
+                    .on_level => @intFromEnum(level) >= @intFromEnum(cfg.flush_on_level),
+                };
+                self.file_sink.writeLine(line, flush_file) catch self.recordFileError();
+            }
+            for (self.extra_sinks.items) |sink| {
+                sink.vtable.write(sink.ptr, level, @tagName(scope_tag), line);
             }
         }
 
@@ -299,31 +288,7 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
                 .json => fmt_internal.formatJson(self.line_buf, cfg.timestamp, cfg.source, scope_tag, level, src, fmt, args, prefix_fields, fields, self.io),
             };
 
-            if (comptime cfg.stderr) {
-                const w = &self.stderr_writer.interface;
-                if (self.colorize) {
-                    w.writeAll(ansi(level)) catch {};
-                    w.writeAll(line) catch {};
-                    w.writeAll(ANSI_RESET) catch {};
-                } else {
-                    w.writeAll(line) catch {};
-                }
-                w.flush() catch {};
-            }
-            if (self.file_sink_opened) {
-                // The flush decision is comptime-known per call site. Under
-                // `.on_level`, calls below the threshold compile to buffered
-                // writes with no runtime branch.
-                const flush_file = comptime switch (cfg.flush_policy) {
-                    .every_line => true,
-                    .buffered => false,
-                    .on_level => @intFromEnum(level) >= @intFromEnum(cfg.flush_on_level),
-                };
-                self.file_sink.writeLine(line, flush_file) catch self.recordFileError();
-            }
-            for (self.extra_sinks.items) |sink| {
-                sink.vtable.write(sink.ptr, level, @tagName(scope_tag), line);
-            }
+            self.emitLine(scope_tag, level, line);
         }
     };
 }
