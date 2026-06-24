@@ -17,6 +17,8 @@ log.warn("disk {d}% full", .{92});
 
 - **Comptime-erased filtering** - calls below the level threshold emit no code
   and no string data.
+- **Enabled checks** - guard expensive payload construction with
+  `enabled(level)` before logging.
 - **Scopes** - name independent lanes (`server` vs `admin`), each with its own
   compile-time level threshold. Typos fail to compile.
 - **Context fields** - `with(.{ .user = id })` attaches runtime data to every
@@ -38,6 +40,14 @@ See [`examples/`](examples/) for runnable usage of each:
 - [`json.zig`](examples/json.zig) - NDJSON output with structured fields.
 - [`scopes.zig`](examples/scopes.zig) - per-scope levels and compile-time filtering.
 - [`structured.zig`](examples/structured.zig) - JSON kv fields with enum and optional values.
+
+Guard expensive payload construction with `enabled()`:
+
+```zig
+if (log.enabled(.debug)) {
+    log.debug("payload {s}", .{buildExpensivePayload()});
+}
+```
 
 ## Installation
 

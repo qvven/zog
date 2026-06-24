@@ -30,6 +30,10 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
             return cfg.min_level;
         }
 
+        fn isEnabled(comptime tag: Scope, comptime level: Level) bool {
+            return @intFromEnum(level) >= @intFromEnum(effectiveMinLevel(tag));
+        }
+
         file_sink: FileSink = undefined,
         file_sink_opened: bool = false,
         stderr_sink: StderrSink = undefined,
@@ -88,6 +92,12 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
             if (comptime cfg.thread_safe) self.mutex.lockUncancelable(self.io);
             defer if (comptime cfg.thread_safe) self.mutex.unlock(self.io);
             try self.extra_sinks.append(self.gpa, sink);
+        }
+
+        /// Returns whether `level` is enabled for the default scope. Use this
+        /// to guard expensive payload construction before calling a log method.
+        pub inline fn enabled(_: *Self, comptime level: Level) bool {
+            return comptime isEnabled(.default, level);
         }
 
         /// Flush buffered output to the underlying handles. Only meaningful
@@ -195,6 +205,9 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
         fn AtLogger(comptime tag: Scope, comptime src: SourceLocation) type {
             return struct {
                 parent: *Self,
+                pub inline fn enabled(_: @This(), comptime level: Level) bool {
+                    return comptime isEnabled(tag, level);
+                }
                 pub inline fn debug(s: @This(), comptime fmt: []const u8, payload: anytype) void {
                     s.parent.dispatch(tag, .debug, src, fmt, .{}, payload);
                 }
@@ -217,6 +230,9 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
             return struct {
                 parent: *Self,
                 prefix: P,
+                pub inline fn enabled(_: @This(), comptime level: Level) bool {
+                    return comptime isEnabled(tag, level);
+                }
                 pub inline fn debug(s: @This(), comptime fmt: []const u8, payload: anytype) void {
                     s.parent.dispatch(tag, .debug, src, fmt, s.prefix, payload);
                 }
@@ -247,6 +263,9 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
         fn Scoped(comptime tag: Scope) type {
             return struct {
                 parent: *Self,
+                pub inline fn enabled(_: @This(), comptime level: Level) bool {
+                    return comptime isEnabled(tag, level);
+                }
                 pub inline fn debug(s: @This(), comptime fmt: []const u8, payload: anytype) void {
                     s.parent.dispatch(tag, .debug, null, fmt, .{}, payload);
                 }
@@ -278,7 +297,7 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
             prefix_fields: anytype,
             fields: anytype,
         ) void {
-            if (comptime @intFromEnum(level) < @intFromEnum(effectiveMinLevel(scope_tag))) return;
+            if (comptime !isEnabled(scope_tag, level)) return;
 
             if (comptime cfg.thread_safe) self.mutex.lockUncancelable(self.io);
             defer if (comptime cfg.thread_safe) self.mutex.unlock(self.io);

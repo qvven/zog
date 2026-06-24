@@ -125,6 +125,43 @@ test "level filter: debug below min_level=.info skips sinks" {
     try testing.expect(std.mem.indexOf(u8, mem.bytes(), "should be filtered") == null);
 }
 
+test "enabled reports default, scoped, and derived logger level filters" {
+    const gpa = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const Scope = enum {
+        default,
+        api,
+        db,
+        pub fn minLevel(comptime s: @This()) Level {
+            return switch (s) {
+                .api => .debug,
+                .db => .err,
+                else => .info,
+            };
+        }
+    };
+
+    const Logger = make(.{ .stderr = false, .Scope = Scope, .min_level = .info });
+    var log = try Logger.open(gpa, io);
+    defer log.close(io);
+
+    try testing.expect(!log.enabled(.debug));
+    try testing.expect(log.enabled(.info));
+
+    const api = log.scope(.api);
+    try testing.expect(api.enabled(.debug));
+
+    const db = log.scope(.db);
+    try testing.expect(!db.enabled(.warn));
+    try testing.expect(db.enabled(.err));
+    try testing.expect(!db.with(.{ .query = "select" }).enabled(.warn));
+    try testing.expect(db.with(.{ .query = "select" }).at(@src()).enabled(.err));
+
+    try testing.expect(!log.with(.{ .request_id = "rid" }).enabled(.debug));
+    try testing.expect(log.at(@src()).enabled(.info));
+}
+
 test "scope filter: per-scope minLevel lets .db emit only err" {
     const gpa = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
