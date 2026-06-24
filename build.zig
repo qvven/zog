@@ -47,6 +47,7 @@ pub fn build(b: *std.Build) void {
 
     const examples_step = b.step("examples", "Build the examples");
     addExample(b, target, optimize, mod, examples_step, "basic", "examples/basic.zig");
+    addExample(b, target, optimize, mod, examples_step, "file_rotation", "examples/file_rotation.zig");
     addExample(b, target, optimize, mod, examples_step, "json", "examples/json.zig");
     addExample(b, target, optimize, mod, examples_step, "scopes", "examples/scopes.zig");
     addExample(b, target, optimize, mod, examples_step, "structured", "examples/structured.zig");

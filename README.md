@@ -34,6 +34,7 @@ log.warn("disk {d}% full", .{92});
 See [`examples/`](examples/) for runnable usage of each:
 
 - [`basic.zig`](examples/basic.zig) - text logs with format args.
+- [`file_rotation.zig`](examples/file_rotation.zig) - size-based file rotation.
 - [`json.zig`](examples/json.zig) - NDJSON output with structured fields.
 - [`scopes.zig`](examples/scopes.zig) - per-scope levels and compile-time filtering.
 - [`structured.zig`](examples/structured.zig) - JSON kv fields with enum and optional values.
