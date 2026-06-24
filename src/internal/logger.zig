@@ -6,7 +6,7 @@ const std = @import("std");
 const Io = std.Io;
 const fmt_internal = @import("format.zig");
 const fields_internal = @import("fields.zig");
-const rotation_internal = @import("rotation.zig");
+const file_sink_internal = @import("file_sink.zig");
 
 const ANSI_RESET = "\x1b[0m";
 const SourceLocation = std.builtin.SourceLocation;
@@ -25,6 +25,7 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
     const Level = root.Level;
     const Sink = root.Sink;
     const Stats = root.Stats;
+    const FileSink = file_sink_internal.Make(cfg);
 
     return struct {
         const Self = @This();
@@ -37,10 +38,8 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
             return cfg.min_level;
         }
 
-        file: ?Io.File = null,
-        file_writer: Io.File.Writer = undefined,
-        file_writer_opened: bool = false,
-        file_bytes: u64 = 0,
+        file_sink: FileSink = undefined,
+        file_sink_opened: bool = false,
         stderr_file: Io.File = undefined,
         stderr_writer: Io.File.Writer = undefined,
         stderr_opened: bool = false,
@@ -62,7 +61,7 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
                 .gpa = gpa,
                 .io = io,
             };
-            errdefer self.cleanupOpenFailure(io);
+            errdefer self.cleanupOpenFailure();
 
             if (comptime cfg.stderr) {
                 // Size the stderr buffer to hold a full line (plus a little
@@ -79,54 +78,29 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
                 self.colorize = self.stderr_file.supportsAnsiEscapeCodes(io) catch false;
             }
 
-            if (comptime cfg.file_path) |path| {
-                const f = try Io.Dir.cwd().createFile(io, path, .{
-                    .truncate = false,
-                    .read = true,
-                });
-                var file_owned = true;
-                errdefer if (file_owned) f.close(io);
-                const file_buf = try gpa.alloc(u8, cfg.file_buf_bytes);
-                self.file = f;
-                file_owned = false;
-                self.file_writer = f.writer(io, file_buf);
-                self.file_writer_opened = true;
-                const end = f.length(io) catch 0;
-                self.file_writer.seekTo(end) catch {};
-                self.file_bytes = end;
+            if (comptime cfg.file_path != null) {
+                self.file_sink = try FileSink.open(gpa, io);
+                self.file_sink_opened = true;
             }
 
             return self;
         }
 
         pub fn close(self: *Self, io: Io) void {
+            _ = io;
             if (self.stderr_opened) {
                 self.stderr_writer.interface.flush() catch {};
                 self.gpa.free(self.stderr_writer.interface.buffer);
                 self.stderr_opened = false;
             }
-            if (self.file) |f| {
-                self.file_writer.interface.flush() catch {};
-                f.close(io);
-            }
-            if (self.file_writer_opened) {
-                self.gpa.free(self.file_writer.interface.buffer);
-                self.file_writer_opened = false;
-            }
+            if (self.file_sink_opened) self.file_sink.close();
             self.extra_sinks.deinit(self.gpa);
             self.gpa.free(self.line_buf);
             self.* = undefined;
         }
 
-        fn cleanupOpenFailure(self: *Self, io: Io) void {
-            if (self.file) |f| {
-                f.close(io);
-                self.file = null;
-            }
-            if (self.file_writer_opened) {
-                self.gpa.free(self.file_writer.interface.buffer);
-                self.file_writer_opened = false;
-            }
+        fn cleanupOpenFailure(self: *Self) void {
+            if (self.file_sink_opened) self.file_sink.close();
             if (self.stderr_opened) {
                 self.gpa.free(self.stderr_writer.interface.buffer);
                 self.stderr_opened = false;
@@ -151,62 +125,9 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
             if (comptime cfg.thread_safe) self.mutex.lockUncancelable(self.io);
             defer if (comptime cfg.thread_safe) self.mutex.unlock(self.io);
             if (self.stderr_opened) self.stderr_writer.interface.flush() catch {};
-            if (self.file != null) {
-                self.file_writer.interface.flush() catch self.recordFileError();
+            if (self.file_sink_opened) {
+                self.file_sink.flush() catch self.recordFileError();
             }
-        }
-
-        fn writeFileLine(self: *Self, line: []const u8, do_flush: bool) void {
-            if (self.file == null) return;
-
-            const w = &self.file_writer.interface;
-            w.writeAll(line) catch {
-                self.recordFileError();
-                return;
-            };
-            if (do_flush) {
-                w.flush() catch {
-                    self.recordFileError();
-                    return;
-                };
-            }
-            self.file_bytes += line.len;
-            switch (comptime cfg.file_rotation) {
-                .none => {},
-                .size => |rotation| {
-                    if (self.file_bytes >= rotation.max_bytes) {
-                        self.rotateFile() catch self.recordFileError();
-                    }
-                },
-            }
-        }
-
-        fn rotateFile(self: *Self) !void {
-            const path = comptime cfg.file_path orelse unreachable;
-            try self.file_writer.interface.flush();
-            if (self.file) |f| {
-                f.close(self.io);
-                self.file = null;
-            }
-            errdefer self.reopenFile(false) catch {};
-
-            var scratch: [rotation_internal.timestampedScratchLen(path.len)]u8 = undefined;
-            const now = Io.Clock.now(.real, self.io).toMilliseconds();
-            try rotation_internal.rotateTimestamped(self.io, Io.Dir.cwd(), path, now, &scratch);
-            try self.reopenFile(true);
-        }
-
-        fn reopenFile(self: *Self, comptime truncate: bool) !void {
-            const path = comptime cfg.file_path orelse unreachable;
-            const f = try Io.Dir.cwd().createFile(self.io, path, .{
-                .truncate = truncate,
-                .read = true,
-            });
-            errdefer f.close(self.io);
-            self.file = f;
-            self.file_writer = f.writer(self.io, self.file_writer.interface.buffer);
-            self.file_bytes = if (truncate) 0 else f.length(self.io) catch 0;
-            if (!truncate) self.file_writer.seekTo(self.file_bytes) catch {};
         }
 
         fn recordFileError(self: *Self) void {
@@ -389,7 +310,7 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
                 }
                 w.flush() catch {};
             }
-            if (self.file != null) {
+            if (self.file_sink_opened) {
                 // The flush decision is comptime-known per call site. Under
                 // `.on_level`, calls below the threshold compile to buffered
                 // writes with no runtime branch.
@@ -398,7 +319,7 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
                     .buffered => false,
                     .on_level => @intFromEnum(level) >= @intFromEnum(cfg.flush_on_level),
                 };
-                self.writeFileLine(line, flush_file);
+                self.file_sink.writeLine(line, flush_file) catch self.recordFileError();
             }
             for (self.extra_sinks.items) |sink| {
                 sink.vtable.write(sink.ptr, level, @tagName(scope_tag), line);

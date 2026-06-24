@@ -1325,9 +1325,9 @@ test "close cleanup: detached file writer buffer is released" {
         .file_path = path,
     });
     var log = try Logger.open(gpa, io);
-    if (log.file) |f| {
+    if (log.file_sink.file) |f| {
         f.close(io);
-        log.file = null;
+        log.file_sink.file = null;
     }
     log.close(io);
 }
@@ -1352,7 +1352,7 @@ test "file write failure increments stats counters" {
     defer mem.deinit();
     try log.addSink(mem.sink());
 
-    if (log.file) |f| f.close(io);
+    if (log.file_sink.file) |f| f.close(io);
     log.info("this write cannot reach the closed file handle", .{});
     try testing.expectEqual(@as(usize, 1), mem.count());
     try testing.expect(std.mem.indexOf(u8, mem.entries()[0].line, "closed file handle") != null);
@@ -1361,7 +1361,7 @@ test "file write failure increments stats counters" {
     try testing.expectEqual(@as(u64, 1), s.file_write_errors);
     try testing.expectEqual(@as(u64, 1), s.dropped_lines);
 
-    log.file = null;
+    log.file_sink.file = null;
     log.close(io);
 }
 
