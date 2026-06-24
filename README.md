@@ -39,6 +39,9 @@ See [`examples/`](examples/) for runnable usage of each:
 - [`scopes.zig`](examples/scopes.zig) - per-scope levels and compile-time filtering.
 - [`structured.zig`](examples/structured.zig) - JSON kv fields with enum and optional values.
 
+See [`docs/architecture.md`](docs/architecture.md) for the internal module
+layout and extension rules.
+
 ## Installation
 
 Add zog to your project:

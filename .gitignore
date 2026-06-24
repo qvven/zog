@@ -9,7 +9,7 @@ example.log.*
 # date-stamped (app.log.2026-06-18), and zero-padded collision (.001) siblings.
 *.log
 *.log.*
-docs/
+docs/superpowers/
 *.tmp
 *.temp
 *.bak
