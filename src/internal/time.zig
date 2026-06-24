@@ -4,6 +4,7 @@ const Io = std.Io;
 pub const ISO8601_UTC_LEN: usize = 24;
 pub const TEXT_ISO8601_UTC_PREFIX_LEN: usize = 27;
 pub const JSON_ISO8601_UTC_FIELD_LEN: usize = "\"ts\":\"".len + ISO8601_UTC_LEN + "\",".len;
+pub const ARCHIVE_TIMESTAMP_LEN: usize = 20;
 
 /// Write a unix epoch millisecond value as fixed-width ISO 8601 UTC.
 /// Output is exactly 24 bytes: `2026-06-16T15:30:42.123Z`.
@@ -33,6 +34,20 @@ pub fn formatIso8601Utc(out: []u8, epoch_ms: i64) void {
     out[19] = '.';
     printDigits(out[20..23], ms_part, 3);
     out[23] = 'Z';
+}
+
+/// Write a filesystem-friendly UTC timestamp for rotated log archives.
+/// Output is exactly 20 bytes: `2026-06-16T15-30-42Z`.
+pub fn formatArchiveTimestamp(out: []u8, epoch_ms: i64) void {
+    std.debug.assert(out.len >= ARCHIVE_TIMESTAMP_LEN);
+    var iso: [ISO8601_UTC_LEN]u8 = undefined;
+    formatIso8601Utc(&iso, epoch_ms);
+    @memcpy(out[0..13], iso[0..13]);
+    out[13] = '-';
+    @memcpy(out[14..16], iso[14..16]);
+    out[16] = '-';
+    @memcpy(out[17..19], iso[17..19]);
+    out[19] = 'Z';
 }
 
 fn printDigits(out: []u8, value: anytype, comptime width: usize) void {

@@ -6,6 +6,7 @@ const std = @import("std");
 const Io = std.Io;
 const fmt_internal = @import("format.zig");
 const fields_internal = @import("fields.zig");
+const rotation_internal = @import("rotation.zig");
 
 const ANSI_RESET = "\x1b[0m";
 const SourceLocation = std.builtin.SourceLocation;
@@ -39,6 +40,7 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
         file: ?Io.File = null,
         file_writer: Io.File.Writer = undefined,
         file_writer_opened: bool = false,
+        file_bytes: u64 = 0,
         stderr_file: Io.File = undefined,
         stderr_writer: Io.File.Writer = undefined,
         stderr_opened: bool = false,
@@ -91,6 +93,7 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
                 self.file_writer_opened = true;
                 const end = f.length(io) catch 0;
                 self.file_writer.seekTo(end) catch {};
+                self.file_bytes = end;
             }
 
             return self;
@@ -167,6 +170,43 @@ pub fn Make(comptime root: type, comptime cfg: root.Config) type {
                     return;
                 };
             }
+            self.file_bytes += line.len;
+            switch (comptime cfg.file_rotation) {
+                .none => {},
+                .size => |rotation| {
+                    if (self.file_bytes >= rotation.max_bytes) {
+                        self.rotateFile() catch self.recordFileError();
+                    }
+                },
+            }
+        }
+
+        fn rotateFile(self: *Self) !void {
+            const path = comptime cfg.file_path orelse unreachable;
+            try self.file_writer.interface.flush();
+            if (self.file) |f| {
+                f.close(self.io);
+                self.file = null;
+            }
+            errdefer self.reopenFile(false) catch {};
+
+            var scratch: [rotation_internal.timestampedScratchLen(path.len)]u8 = undefined;
+            const now = Io.Clock.now(.real, self.io).toMilliseconds();
+            try rotation_internal.rotateTimestamped(self.io, Io.Dir.cwd(), path, now, &scratch);
+            try self.reopenFile(true);
+        }
+
+        fn reopenFile(self: *Self, comptime truncate: bool) !void {
+            const path = comptime cfg.file_path orelse unreachable;
+            const f = try Io.Dir.cwd().createFile(self.io, path, .{
+                .truncate = truncate,
+                .read = true,
+            });
+            errdefer f.close(self.io);
+            self.file = f;
+            self.file_writer = f.writer(self.io, self.file_writer.interface.buffer);
+            self.file_bytes = if (truncate) 0 else f.length(self.io) catch 0;
+            if (!truncate) self.file_writer.seekTo(self.file_bytes) catch {};
         }
 
         fn recordFileError(self: *Self) void {

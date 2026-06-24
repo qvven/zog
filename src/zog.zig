@@ -26,6 +26,15 @@ pub const LineFormat = enum { text, json };
 /// Source location rendering mode.
 pub const SourceMode = enum { none, file_line };
 
+pub const SizeRotation = struct {
+    max_bytes: u64,
+};
+
+pub const FileRotation = union(enum) {
+    none,
+    size: SizeRotation,
+};
+
 /// When the file sink flushes to disk. Only affects the file sink; stderr
 /// always flushes per line so terminal output stays prompt.
 pub const FlushPolicy = enum {
@@ -94,6 +103,8 @@ pub const Config = struct {
     stderr: bool = true,
     /// Optional log file path.
     file_path: ?[]const u8 = null,
+    /// Optional file rotation policy. Does not delete old archives.
+    file_rotation: FileRotation = .none,
     /// When the file sink flushes to disk. Does not affect stderr.
     flush_policy: FlushPolicy = .every_line,
     /// Level threshold that forces a flush under `.on_level`.
@@ -119,6 +130,15 @@ pub fn make(comptime cfg: Config) type {
         if (cfg.file_path) |_| {
             if (cfg.file_buf_bytes < 64)
                 @compileError("zog: file_buf_bytes must be at least 64");
+        }
+        switch (cfg.file_rotation) {
+            .none => {},
+            .size => |rotation| {
+                if (cfg.file_path == null)
+                    @compileError("zog: file_rotation requires file_path");
+                if (rotation.max_bytes == 0)
+                    @compileError("zog: file_rotation.size.max_bytes must be greater than 0");
+            },
         }
     }
 

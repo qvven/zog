@@ -27,7 +27,8 @@ log.warn("disk {d}% full", .{92});
   correct string escaping.
 - **Multiple sinks** - built-in stderr (with auto color detection) and file,
   plus a `Sink` vtable for anything else: memory, syslog, network.
-- **Tunable file flush** - flush every line, buffer, or flush on level.
+- **Tunable file flush and rotation** - flush every line, buffer, flush on
+  level, or archive the file when it reaches a size cap.
 - **Thread-safe** - optional internal mutex.
 
 See [`examples/`](examples/) for runnable usage of each:
@@ -76,6 +77,7 @@ pub const Config = struct {
     source: SourceMode = .none,                // .none | .file_line
     stderr: bool = true,
     file_path: ?[]const u8 = null,
+    file_rotation: FileRotation = .none,       // .none | .{ .size = .{ .max_bytes = n } }
     flush_policy: FlushPolicy = .every_line,   // .every_line | .buffered | .on_level
     flush_on_level: Level = .warn,             // .on_level flush threshold
     file_buf_bytes: usize = 4096,              // file sink write buffer

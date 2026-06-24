@@ -6,6 +6,7 @@ const Level = zog.Level;
 const MemorySink = zog.MemorySink;
 const make = zog.make;
 const time_internal = @import("time.zig");
+const rotation_internal = @import("rotation.zig");
 
 fn parseJsonLine(gpa: std.mem.Allocator, line: []const u8) !std.json.Parsed(std.json.Value) {
     return std.json.parseFromSlice(std.json.Value, gpa, std.mem.trimEnd(u8, line, "\n"), .{});
@@ -52,6 +53,8 @@ test "public api contract: root exports stable v0.1 surface" {
     try testing.expect(@hasDecl(zog, "Stats"));
     try testing.expect(@hasDecl(zog, "Config"));
     try testing.expect(@hasDecl(zog, "make"));
+    try testing.expect(@hasDecl(zog, "FileRotation"));
+    try testing.expect(@hasDecl(zog, "SizeRotation"));
     try testing.expect(@hasDecl(zog, "FlushPolicy"));
     try testing.expect(@hasField(zog.Stats, "dropped_lines"));
     try testing.expect(@hasField(zog.Stats, "file_write_errors"));
@@ -64,6 +67,7 @@ test "public api contract: root exports stable v0.1 surface" {
     try testing.expectEqual(zog.SourceMode.none, cfg.source);
     try testing.expectEqual(true, cfg.stderr);
     try testing.expectEqual(@as(?[]const u8, null), cfg.file_path);
+    try testing.expectEqual(zog.FileRotation.none, cfg.file_rotation);
     try testing.expectEqual(zog.FlushPolicy.every_line, cfg.flush_policy);
     try testing.expectEqual(Level.warn, cfg.flush_on_level);
     try testing.expectEqual(@as(usize, 4096), cfg.file_buf_bytes);
@@ -228,6 +232,13 @@ test "timestamp constants describe fixed ISO field widths" {
     try testing.expectEqual(@as(usize, 24), time_internal.ISO8601_UTC_LEN);
     try testing.expectEqual(@as(usize, 27), time_internal.TEXT_ISO8601_UTC_PREFIX_LEN);
     try testing.expectEqual(@as(usize, 32), time_internal.JSON_ISO8601_UTC_FIELD_LEN);
+    try testing.expectEqual(@as(usize, 20), time_internal.ARCHIVE_TIMESTAMP_LEN);
+}
+
+test "archive timestamp uses filesystem-friendly UTC separators" {
+    var buf: [time_internal.ARCHIVE_TIMESTAMP_LEN]u8 = undefined;
+    time_internal.formatArchiveTimestamp(&buf, 1622924906_123);
+    try testing.expectEqualStrings("2021-06-05T20-28-26Z", &buf);
 }
 
 test "unix_ms timestamp writers render expected text and json fields" {
@@ -966,6 +977,96 @@ test "flush policy: custom file_buf_bytes compiles and logs" {
     try testing.expect(std.mem.indexOf(u8, content, "sized") != null);
 }
 
+test "file rotation: size cap archives current file with timestamped suffix" {
+    const gpa = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const cwd = std.Io.Dir.cwd();
+    const path = "rotate_size.log";
+
+    deleteLogFamily(io, cwd, path);
+    defer deleteLogFamily(io, cwd, path);
+
+    const Logger = make(.{
+        .stderr = false,
+        .timestamp = .none,
+        .file_path = path,
+        .file_rotation = .{ .size = .{ .max_bytes = 32 } },
+    });
+    var log = try Logger.open(gpa, io);
+    defer log.close(io);
+
+    log.info("first payload payload payload", .{});
+    log.info("second", .{});
+    log.flush();
+
+    var archive_buf: [256]u8 = undefined;
+    const archive = (try findSingleArchive(io, cwd, path, &archive_buf)) orelse return error.ExpectedArchive;
+
+    const archived = try readLogFileAlloc(io, cwd, archive, gpa);
+    defer gpa.free(archived);
+    try testing.expectEqualStrings("[info] first payload payload payload\n", archived);
+
+    const active = try readLogFileAlloc(io, cwd, path, gpa);
+    defer gpa.free(active);
+    try testing.expectEqualStrings("[info] second\n", active);
+}
+
+test "file rotation: buffered writes are flushed before archive rename" {
+    const gpa = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const cwd = std.Io.Dir.cwd();
+    const path = "rotate_buffered.log";
+
+    deleteLogFamily(io, cwd, path);
+    defer deleteLogFamily(io, cwd, path);
+
+    const Logger = make(.{
+        .stderr = false,
+        .timestamp = .none,
+        .file_path = path,
+        .flush_policy = .buffered,
+        .file_rotation = .{ .size = .{ .max_bytes = 32 } },
+    });
+    var log = try Logger.open(gpa, io);
+    defer log.close(io);
+
+    log.info("first payload payload payload", .{});
+
+    var archive_buf: [256]u8 = undefined;
+    const archive = (try findSingleArchive(io, cwd, path, &archive_buf)) orelse return error.ExpectedArchive;
+    try testing.expect((try fileSize(io, cwd, archive)) > 0);
+}
+
+test "file rotation: same-second archives use collision suffixes" {
+    const gpa = testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const cwd = std.Io.Dir.cwd();
+    const path = "rotate_collision.log";
+    const epoch_ms = 1622924906_000;
+
+    deleteLogFamily(io, cwd, path);
+    defer deleteLogFamily(io, cwd, path);
+
+    try writeWholeFile(io, cwd, path, "first\n");
+    var scratch1: [rotation_internal.timestampedScratchLen(path.len)]u8 = undefined;
+    try rotation_internal.rotateTimestamped(io, cwd, path, epoch_ms, &scratch1);
+
+    try writeWholeFile(io, cwd, path, "second\n");
+    var scratch2: [rotation_internal.timestampedScratchLen(path.len)]u8 = undefined;
+    try rotation_internal.rotateTimestamped(io, cwd, path, epoch_ms, &scratch2);
+
+    const first_archive = "rotate_collision.log.2021-06-05T20-28-26Z";
+    const second_archive = "rotate_collision.log.2021-06-05T20-28-26Z.001";
+
+    const first = try readLogFileAlloc(io, cwd, first_archive, gpa);
+    defer gpa.free(first);
+    try testing.expectEqualStrings("first\n", first);
+
+    const second = try readLogFileAlloc(io, cwd, second_archive, gpa);
+    defer gpa.free(second);
+    try testing.expectEqualStrings("second\n", second);
+}
+
 test "flush() is a safe no-op with no file sink" {
     const gpa = testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -1522,6 +1623,50 @@ const DropSink = struct {
 
 fn deleteLogFiles(io: std.Io, cwd: std.Io.Dir, path: []const u8) void {
     cwd.deleteFile(io, path) catch {};
+}
+
+fn deleteLogFamily(io: std.Io, cwd: std.Io.Dir, path: []const u8) void {
+    cwd.deleteFile(io, path) catch {};
+    var dir = cwd.openDir(io, ".", .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "{s}.", .{path}) catch return;
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (entry.kind == .directory) continue;
+        if (std.mem.startsWith(u8, entry.name, prefix)) {
+            dir.deleteFile(io, entry.name) catch {};
+        }
+    }
+}
+
+fn writeWholeFile(io: std.Io, cwd: std.Io.Dir, path: []const u8, bytes: []const u8) !void {
+    const f = try cwd.createFile(io, path, .{ .truncate = true });
+    defer f.close(io);
+    var buf: [64]u8 = undefined;
+    var writer = f.writer(io, &buf);
+    try writer.interface.writeAll(bytes);
+    try writer.interface.flush();
+}
+
+fn findSingleArchive(io: std.Io, cwd: std.Io.Dir, path: []const u8, out: []u8) !?[]const u8 {
+    var dir = try cwd.openDir(io, ".", .{ .iterate = true });
+    defer dir.close(io);
+
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&prefix_buf, "{s}.", .{path});
+    var found: ?[]const u8 = null;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind == .directory) continue;
+        if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+        if (found != null) return error.UnexpectedExtraArchive;
+        if (entry.name.len > out.len) return error.NoSpaceLeft;
+        @memcpy(out[0..entry.name.len], entry.name);
+        found = out[0..entry.name.len];
+    }
+    return found;
 }
 
 /// Read the full current contents of `path` into an allocated buffer (caller
